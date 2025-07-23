@@ -1,3 +1,4 @@
+
 // Crear un worker inline com a Blob per la generació del GIF
 var gifWorkerBlob = new Blob([
   `importScripts('https://cdn.jsdelivr.net/npm/gif.js@0.2.0/dist/gif.worker.js')`
@@ -48,7 +49,10 @@ const lightningJumpPlugin = {
     }
 };
 
+const RASTER_RESOLUTION = 0.02; // Mida de la cel·la de la graella en graus
 let isAutoDetectMode = true; // Comencem en mode automàtic per defecte
+
+let celulesAnteriors = []; // Guardarà les cèl·lules de l'últim minut
 
 function toggleAnalysisMode() {
     if (isAutoDetectMode) {
@@ -2790,15 +2794,15 @@ const ljIconsLayer = L.layerGroup({ pane: 'iconesPane' }).addTo(map);
  * @param {number} resolution - La mida de cada cel·la de la graella (en graus).
  * @returns {Map} - Un mapa on cada clau és "lat_lon" i el valor és un array de llamps.
  */
-function rasteritzarLlamps(historicStrikes, resolution = 0.03) { // CANVI: Resolució més fina (~1x1 km)
+function rasteritzarLlamps(historicStrikes) {
     const grid = new Map();
     historicStrikes.forEach(llamp => {
-        const gridX = Math.floor(llamp.lon / resolution);
-        const gridY = Math.floor(llamp.lat / resolution);
+        const gridX = Math.floor(llamp.lon / RASTER_RESOLUTION);
+        const gridY = Math.floor(llamp.lat / RASTER_RESOLUTION);
         const key = `${gridX}_${gridY}`;
 
         if (!grid.has(key)) {
-            grid.set(key, { strikes: [], coords: { lon: gridX * resolution, lat: gridY * resolution } });
+            grid.set(key, { strikes: [], coords: { lon: gridX * RASTER_RESOLUTION, lat: gridY * RASTER_RESOLUTION } });
         }
         grid.get(key).strikes.push(llamp);
     });
@@ -2862,25 +2866,25 @@ function analitzarCadaCelula(celules, totesLesDades) {
     const bins = totalMinutes / 2;
     const tempsLimitActivitat = now - (20 * 60 * 1000);
 
-    // Es prepara cada cèl·lula per a l'anàlisi
     celules.forEach(cell => {
+        // CORRECCIÓ: Utilitzem la constant per a consistència
         cell.pixelKeys = new Set(cell.pixels.map(p => {
-            const gridX = Math.floor(p.lon / 0.01);
-            const gridY = Math.floor(p.lat / 0.01);
+            const gridX = Math.floor(p.lon / RASTER_RESOLUTION);
+            const gridY = Math.floor(p.lat / RASTER_RESOLUTION);
             return `${gridX}_${gridY}`;
         }));
         cell.recomptesComplets = new Array(bins).fill(0);
     });
 
-    // S'omplen els recomptes de llamps per a cada cèl·lula
     totesLesDades.forEach(llamp => {
-        const ageMinutes = Math.floor((now - llamp.timestamp) / 60000);
-        if (ageMinutes < totalMinutes) {
-            const gridX = Math.floor(llamp.lon / 0.01);
-            const gridY = Math.floor(llamp.lat / 0.01);
-            const key = `${gridX}_${gridY}`;
-            const cellCorresponent = celules.find(c => c.pixelKeys.has(key));
-            if (cellCorresponent) {
+        const gridX = Math.floor(llamp.lon / RASTER_RESOLUTION);
+        const gridY = Math.floor(llamp.lat / RASTER_RESOLUTION);
+        const key = `${gridX}_${gridY}`;
+        
+        const cellCorresponent = celules.find(c => c.pixelKeys.has(key));
+        if (cellCorresponent) {
+            const ageMinutes = Math.floor((now - llamp.timestamp) / 60000);
+            if (ageMinutes < totalMinutes) {
                 const binIndex = bins - 1 - Math.floor(ageMinutes / 2);
                 if (binIndex >= 0 && binIndex < bins) {
                     cellCorresponent.recomptesComplets[binIndex]++;
@@ -2889,14 +2893,17 @@ function analitzarCadaCelula(celules, totesLesDades) {
         }
     });
 
-    // S'executa l'anàlisi de salts per a cada cèl·lula
     celules.forEach(cell => {
         cell.esActiva = cell.strikes.some(llamp => llamp.timestamp >= tempsLimitActivitat);
-        
-        // CORRECCIÓ: Ja no apliquem el filtre de 'compleixLlindarActivitat' aquí.
-        // La funció 'detectarSaltsHistòrics' ja conté el seu propi llindar d'intensitat.
         cell.saltN1 = detectarSaltsHistòrics(cell.recomptesComplets, 1.5);
         cell.saltN2 = detectarSaltsHistòrics(cell.recomptesComplets, 2.0);
+        const binPerComprovar = bins - 2;
+        if (binPerComprovar >= 0) {
+            const flashRate = cell.recomptesComplets[binPerComprovar] / 2;
+            cell.compleixLlindarActivitat = (flashRate >= 10);
+        } else {
+            cell.compleixLlindarActivitat = false;
+        }
     });
 
     return celules;
@@ -3003,14 +3010,13 @@ function visualitzarCelules(celulesAnalitzades) {
  * @returns {Array} The current cells with their history and ID inherited.
  */
 function ferSeguimentDeCelules(celulesActuals, celulesAnteriors) {
-    // CORRECCIÓ: Ens assegurem que totes les cèl·lules, noves o velles, tinguin un centroide
+    // Inicialitzem el centroide de totes les cèl·lules actuals
     celulesActuals.forEach(actual => {
-        if (!actual.centroide) { // Comprovem si ja en té abans de calcular
-            actual.centroide = turf.centroid(turf.featureCollection(actual.pixels.map(p => turf.point([p.lon, p.lat]))));
-        }
+        actual.centroide = turf.centroid(turf.featureCollection(actual.pixels.map(p => turf.point([p.lon, p.lat]))));
     });
 
     if (celulesAnteriors.length === 0) {
+        // Si no hi ha historial, aquesta és la primera aparició. Creem la seva trajectòria inicial.
         celulesActuals.forEach(actual => {
             actual.trajectoria = [actual.centroide.geometry.coordinates];
         });
@@ -3022,7 +3028,6 @@ function ferSeguimentDeCelules(celulesActuals, celulesAnteriors) {
         let distanciaMinima = Infinity;
 
         celulesAnteriors.forEach(anterior => {
-            // Assegurem que la cèl·lula anterior també té centroide
             if (!anterior.centroide) return;
             const distancia = turf.distance(actual.centroide, anterior.centroide);
             if (distancia < distanciaMinima) {
@@ -3036,6 +3041,7 @@ function ferSeguimentDeCelules(celulesActuals, celulesAnteriors) {
             const baseTrajectoria = Array.isArray(millorCandidat.trajectoria) ? millorCandidat.trajectoria : [];
             actual.trajectoria = [...baseTrajectoria, actual.centroide.geometry.coordinates];
         } else {
+            // És una cèl·lula nova, creem la seva trajectòria inicial
             actual.trajectoria = [actual.centroide.geometry.coordinates];
         }
         return actual;
@@ -3049,11 +3055,11 @@ function ferSeguimentDeCelules(celulesActuals, celulesAnteriors) {
  * Executa el procés filtrant primer per llamps recents.
  */
 function analitzarTempestesSMC() {
-    console.log("Iniciant anàlisi de cèl·lules ACTIVES amb reconstrucció de trajectòria...");
+    console.log("Iniciant anàlisi de cèl·lules ACTIVES amb seguiment...");
     const dadesCompletes = getCombinedLightningData();
 
     const now = Date.now();
-    const tempsLimit = now - (20 * 60 * 1000); // Finestra de 20 min per identificar
+    const tempsLimit = now - (20 * 60 * 1000);
     
     const llampsRecents = new Map();
     dadesCompletes.forEach((llamp, id) => {
@@ -3063,11 +3069,15 @@ function analitzarTempestesSMC() {
     });
     
     const graella = rasteritzarLlamps(llampsRecents);
-    const celules = identificarCelules(graella);
+    let celulesActuals = identificarCelules(graella);
     
-    const celulesAnalitzades = analitzarCadaCelula(celules, dadesCompletes);
+    celulesActuals = ferSeguimentDeCelules(celulesActuals, celulesAnteriors);
+    
+    const celulesAnalitzades = analitzarCadaCelula(celulesActuals, dadesCompletes);
     visualitzarCelules(celulesAnalitzades);
     
+    // Guardem les cèl·lules analitzades per a la propera iteració
+    celulesAnteriors = celulesAnalitzades;
     console.log(`Anàlisi completada. S'han trobat ${celulesAnalitzades.length} cèl·lules actives.`);
 }
 
