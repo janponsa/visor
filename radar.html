@@ -1,0 +1,261 @@
+<html lang="ca">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>4E MeteoMAP</title>
+
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/danwild/leaflet-velocity/dist/leaflet-velocity.min.css" />
+  <link rel="stylesheet" href="pluja_neu.css">
+  <link rel="stylesheet" href="fullscreen.css" />
+  <link href='https://api.mapbox.com/mapbox-gl-js/v1.13.1/mapbox-gl.css' rel='stylesheet' />
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet.draw/1.0.4/leaflet.draw.css" />
+</head>
+
+<body>
+
+  <div id="loading-screen">
+    <img src="/Users/janponsa/Downloads/pluja_neu-main-3/logo_blanc.png" alt="Projecte 4 Estacions">
+    <div class="welcome-text">
+      Benvingut al visor de dades en temps real 4E MeteoMAP
+    </div>
+  </div>
+
+<div id="sumatori-controls" style="display: none;">
+    <label for="start-date">Des del dia:</label>
+    <input type="date" id="start-date">
+    <label for="end-date">fins al dia:</label>
+    <input type="date" id="end-date">
+    <button id="calculate-sum-btn">Calcular Sumatori</button>
+    <button id="close-sum-btn">Tancar</button>
+</div>
+
+  <div id="gif-container">
+    <nav id="meteo-controls">
+        <ul>
+            <li class="main-menu-item">
+                <a href="#">Temperatura</a>
+                <ul class="submenu">
+                    <li data-variable-key="smc_32">Actual</li>
+                    <li data-variable-key="smc_40">Màxima</li>
+                    <li data-variable-key="smc_42">Mínima</li>
+                    <li data-variable-key="dewpoint">Punt de Rosada</li>
+                    <li data-variable-key="calc_amplitude">Amplitud Tèrmica</li>
+                    <li data-variable-key="calc_windchill">Sensació Tèrmica (Vent)</li>
+                    <li data-variable-key="calc_humidex">Temperatura de Xafogor</li>
+                    <li data-variable-key="calc_wetbulb">Bulb Humit</li>
+                    <li class="has-submenu">
+                        <a href="#">Variació 24h</a>
+                        <ul class="submenu-level2">
+                            <li data-variable-key="var_tmax_24h">Màxima</li>
+                            <li data-variable-key="var_tmin_24h">Mínima</li>
+                            <li data-variable-key="var_tactual_24h">Actual</li>
+                        </ul>
+                    </li>
+                </ul>
+            </li>
+
+            <li class="main-menu-item">
+                <a href="#">Humitat</a>
+                <ul class="submenu">
+                    <li data-variable-key="smc_33">Relativa</li>
+                    <li data-variable-key="smc_3">Relativa Màxima</li>
+                    <li data-variable-key="smc_44">Relativa Mínima</li>
+                </ul>
+            </li>
+            <li class="main-menu-item">
+                <a href="#">Vent</a>
+                <ul class="submenu">
+                    <li class="has-submenu">
+                        <a href="#" data-variable-key="wind_speed_ms">Velocitat (m/s)</a>
+                        <ul class="submenu-level2">
+                            <li data-variable-key="wind_speed_kmh">en km/h</li>
+                        </ul>
+                    </li>
+                    <li class="has-submenu">
+                        <a href="#" data-variable-key="wind_gust_semihourly_ms">Ratxa Màx. Semihorària (m/s)</a>
+                         <ul class="submenu-level2">
+                            <li data-variable-key="wind_gust_semihourly_kmh">en km/h</li>
+                        </ul>
+                    </li>
+                    <li class="has-submenu">
+                        <a href="#" data-variable-key="wind_gust_daily_ms">Ratxa Màx. Diària (m/s)</a>
+                         <ul class="submenu-level2">
+                            <li data-variable-key="wind_gust_daily_kmh">en km/h</li>
+                        </ul>
+                    </li>
+                    <li data-variable-key="wind_barbs">Direcció i Velocitat (Barbes)</li>
+                </ul>
+            </li>
+            <li class="main-menu-item">
+                <a href="#">Precipitació</a>
+                <ul class="submenu">
+                    <li data-variable-key="precip_semihoraria">Semihorària</li>
+                    <li data-variable-key="smc_35">Diària</li>
+                    <li data-variable-key="smc_72">Màxima en 1 min</li>
+                    <li data-variable-key="smc_72_daily_max">Intensitat Màx. Diària</li>
+                    <li data-variable-key="sumatori_precipitacio">Sumatori</li>
+                </ul>
+            </li>
+
+            <li class="main-menu-item">
+                <a href="#">Pressió</a>
+                <ul class="submenu">
+                    <li data-variable-key="smc_34">Atmosfèrica</li>
+                    <li data-variable-key="smc_1">Màxima</li>
+                    <li data-variable-key="smc_2">Mínima</li>
+                </ul>
+            </li>
+
+            <li class="main-menu-item">
+                <a href="#" data-variable-key="smc_38">Neu</a>
+            </li>
+        </ul>
+        <div id="historic-controls-container">
+            <div class="time-display" id="historic-time-display">--/--/---- --:--</div>
+            <div class="time-buttons">
+                <button id="time-jump-back-24h" title="-24 Hores">-24h</button>
+                <button id="time-step-back" title="Enrere 30 minuts">&lt;&lt;</button>
+                <button id="time-return-live" title="Tornar al Directe">DIRECTE</button>
+                <button id="time-step-fwd" title="Endavant 30 minuts">&gt;&gt;</button>
+                <button id="time-jump-fwd-24h" title="+24 Hores">+24h</button>
+                <button id="historic-calendar-btn" title="Seleccionar data i hora">📅</button>
+                <input type="datetime-local" id="historic-datetime-picker" style="position: absolute; opacity: 0; width: 0; height: 0; border: none; padding: 0;" step="1800">
+            </div>
+        </div>
+    </nav>
+    <div id="logo-container">
+      <img id="logo" src="https://www.projecte4estacions.com/uploads/1/1/9/0/119049478/published/logo-h-azul.png?1696675697" alt="Logo" crossorigin="anonymous" />
+    </div>
+    <div id="map"></div>
+    <div id="plujaoneu-overlay">
+      <span id="plujaoneu-text">Carregant dades...</span>
+    </div>
+
+    <div class="legend">
+      <div class="legend-header">
+        <div class="legend-title">Tipus de precipitació</div>
+        <button class="close-legend">X</button>
+      </div>
+      <div class="legend-scale">
+        <ul class="legend-labels">
+          <li><span style="background-color:#FFC8C8"></span><span class="label"></span></li>
+          <li><span style="background-color:#F8A0A0"></span><span class="label"></span></li>
+          <li><span style="background-color:#E67070"></span><span class="label">Pluja</span></li>
+          <li><span style="background-color:#E65050"></span><span class="label"></span></li>
+          <li><span style="background-color:#C83C3C"></span><span class="label"></span></li>
+          <li><span style="background-color:#A42020"></span><span class="label"></span></li>
+          <li><span style="background-color:#C8FFBE"></span><span class="label"></span></li>
+          <li><span style="background-color:#B4FAAA"></span><span class="label"></span></li>
+          <li><span style="background-color:#78F573"></span><span class="label">Aiguaneu</span></li>
+          <li><span style="background-color:#50F050"></span><span class="label"></span></li>
+          <li><span style="background-color:#37D23C"></span><span class="label"></span></li>
+          <li><span style="background-color:#0FA00F"></span><span class="label"></span></li>
+          <li><span style="background-color:#B4F0FA"></span><span class="label"></span></li>
+          <li><span style="background-color:#96D2FA"></span><span class="label"></span></li>
+          <li><span style="background-color:#50A5F5"></span><span class="label">Neu</span></li>
+          <li><span style="background-color:#3C96F5"></span><span class="label"></span></li>
+          <li><span style="background-color:#2882F0"></span><span class="label"></span></li>
+          <li><span style="background-color:#1464D2"></span><span class="label"></span></li>
+        </ul>
+      </div>
+    </div>
+
+    <div class="llegenda">
+        <div class="legend-header">
+            <div class="llegenda-title">Intensitat de la precipitació</div>
+            <button class="close-legend">X</button>
+        </div>
+        <div class="llegenda-scale">
+            <ul class="llegenda-labels">
+                <li><span style="background-color:#ffffff"></span><span class="label"></span></li>
+                <li><span style="background-color:#ea33f7"></span><span class="label"></span></li>
+                <li><span style="background-color:#ea33ba"></span><span class="label"></span></li>
+                <li><span style="background-color:#ea337e"></span><span class="label">Intensa</span></li>
+                <li><span style="background-color:#ea3347"></span><span class="label"></span></li>
+                <li><span style="background-color:#ea3323"></span><span class="label"></span></li>
+                <li><span style="background-color:#eb4426"></span><span class="label"></span></li>
+                <li><span style="background-color:#ec632b"></span><span class="label"></span></li>
+                <li><span style="background-color:#ef8833"></span><span class="label">Forta</span></li>
+                <li><span style="background-color:#f3af3d"></span><span class="label"></span></li>
+                <li><span style="background-color:#ffff54"></span><span class="label"></span></li>
+                <li><span style="background-color:#ccfd50"></span><span class="label"></span></li>
+                <li><span style="background-color:#a0fc4e"></span><span class="label">Moderada</span></li>
+                <li><span style="background-color:#81fb4d"></span><span class="label"></span></li>
+                <li><span style="background-color:#75fb4c"></span><span class="label"></span></li>
+                <li><span style="background-color:#75fb8e"></span><span class="label"></span></li>
+                <li><span style="background-color:#75fbfd"></span><span class="label">Feble</span></li>
+                <li><span style="background-color:#0000f5"></span><span class="label"></span></li>
+                <li><span style="background-color:#3a06f5"></span><span class="label"></span></li>
+                <li><span style="background-color:#7514f5"></span><span class="label"></span></li>
+            </ul>
+        </div>
+    </div>
+  </div>
+  <input type="range" id="range-slider" min="0" max="29" step="1" value="29">
+  <button id="play-button">▶️</button>
+  <div id="progress-container">Generant GIF... <span id="progress">0%</span></div>
+  
+<div id="side-menu">
+    <button id="lightning-btn" title="Activar/Desactivar Llamps">⚡️</button>
+    <button id="toggle-arrows-btn" class="btn">🌬️</button>
+    <button id="lock-map" class="btn">🔒</button>
+    <button id="clear-data-btn" title="Netejar etiquetes del mapa">🧹</button>
+    <button id="gif-button">🎥</button>
+    <button id="alert-btn" title="Mostrar alertes de temps sever"><img src="https://cdn3.iconfinder.com/data/icons/tango-icon-library/48/dialog-warning-1024.png"></button>
+</div>
+
+<div id="alert-panel" style="display: none;">
+    <div id="alert-panel-header">
+        <span>Alertes XEMA:</span>
+        <button id="close-alert-panel">×</button>
+    </div>
+    <ul id="alert-options">
+        <li>
+            <button id="alert-intensity-btn">
+                <img src="https://cdn3.iconfinder.com/data/icons/picons-weather/57/56_tornado_storm_warning-1024.png" alt="Icona intensitat">
+                <span>Alertes per intensitat</span>
+            </button>
+        </li>
+        <li>
+            <button id="alert-accumulation-btn">
+                <img src="imatges/flood.png" alt="Icona acumulació">
+                <span>Alertes per acumulació</span>
+            </button>
+        </li>
+    </ul>
+</div>
+
+<div id="lightning-jump-overlay" style="display: none;">
+    <div id="lightning-jump-chart-container">
+        <div id="chart-header">
+            <button id="toggle-chart-size-btn" title="Maximitzar/Minimitzar">🗖</button>
+            <button id="close-chart-btn" title="Tancar Gràfic">✕</button>
+        </div>
+        <canvas id="lightningJumpChart"></canvas>
+    </div>
+</div>
+
+  <canvas id="canvas" style="display:none;"></canvas>
+
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/gh/danwild/leaflet-velocity/dist/leaflet-velocity.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/gif.js/0.2.0/gif.js"></script>
+  <script src="https://unpkg.com/leaflet-image/leaflet-image.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <script src="fullscreen.js"></script>
+  <script src="https://unpkg.com/leaflet-polylinedecorator@1.6.0/dist/leaflet.polylineDecorator.js"></script>
+  <script src='https://api.mapbox.com/mapbox-gl-js/v1.13.1/mapbox-gl.js'></script>
+  <script src="https://unpkg.com/mapbox-gl-leaflet/leaflet-mapbox-gl.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet.draw/1.0.4/leaflet.draw.js"></script>
+ <script src="https://cdnjs.cloudflare.com/ajax/libs/Turf.js/6.5.0/turf.min.js"></script>
+
+  <script src="comarques.js"></script>
+  <script src="municipis.js"></script>
+  <script src="webcams.js"></script>
+  
+  <script src="pluja_neu.js"></script>
+</body>
+</html>
