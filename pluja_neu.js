@@ -234,6 +234,16 @@ const map = L.map('map', {
   layers: [] // Comencem sense capes per afegir-les després amb el control
 }).setView([41.8, 1.6], 8); // Centrem una mica millor per a Catalunya
 
+map.createPane('llampsPane');
+map.getPane('llampsPane').style.zIndex = 450; // Nivell inferior
+
+map.createPane('poligonsPane');
+map.getPane('poligonsPane').style.zIndex = 500; // Nivell intermedi
+
+map.createPane('iconesPane');
+map.getPane('iconesPane').style.zIndex = 550; // Nivell superior
+
+
 // ===================================================================
 // SOLUCIÓ: Mou i enganxa les dues línies aquí
 // ===================================================================
@@ -2584,6 +2594,8 @@ document.getElementById('clear-data-btn').addEventListener('click', function() {
     console.log("S'han netejat les etiquetes del mapa.");
 });
 
+
+
 // ======================================================
 // LÒGICA PER AL SISTEMA D'ALERTES DE TEMPS SEVER (VERSIÓ CORREGIDA)
 // ======================================================
@@ -2704,11 +2716,13 @@ let lightningChart = null;  // Variable global per al gràfic
  */
 function detectarSaltsHistòrics(recomptes, sigmaThreshold = 2.0) {
     const saltsDetectats = [];
-    const periodeCalculBins = 6; // 6 bins de 2 minuts = 12 minuts de referència
-    const minLlampsPerBin = 10;   // Mínim de 10 llamps en un bin de 2 minuts
+    const periodeCalculBins = 6; 
+    const minLlampsPerBin = 10;   
 
     for (let i = periodeCalculBins; i < recomptes.length; i++) {
         const dadesReferencia = recomptes.slice(i - periodeCalculBins, i);
+        
+        // CORRECCIÓ AQUÍ: La funció 'reduce' ara suma correctament els valors.
         const suma = dadesReferencia.reduce((a, b) => a + b, 0);
         const mitjana = suma / dadesReferencia.length;
 
@@ -2718,7 +2732,7 @@ function detectarSaltsHistòrics(recomptes, sigmaThreshold = 2.0) {
         const variancia = diferenciaQuadrada.reduce((a, b) => a + b, 0) / dadesReferencia.length;
         const desviacioEstandard = Math.sqrt(variancia);
 
-        if (desviacioEstandard < 1) continue; // Si no hi ha variabilitat, no hi pot haver salt
+        if (desviacioEstandard < 1) continue;
 
         const llindar = mitjana + (sigmaThreshold * desviacioEstandard);
         const valorActual = recomptes[i];
@@ -2736,21 +2750,25 @@ function detectarSaltsHistòrics(recomptes, sigmaThreshold = 2.0) {
  */
 function getCombinedLightningData() {
     const combinedStrikes = new Map();
+    const now = Date.now();
+    const timeCutoff = now - (120 * 60 * 1000); // Finestra fixa de 120 minuts
 
-    // 1. Afegeix totes les dades històriques
+    // 1. Afegeix les dades històriques (que ja estan dins de la finestra de 120 min)
     realtimeLightningManager.historicStrikes.forEach((strike, id) => {
         combinedStrikes.set(id, strike);
     });
 
-    // 2. Afegeix les dades en temps real (dels últims 30 minuts)
+    // 2. Afegeix NOMÉS les dades en temps real que siguin més recents que 120 minuts
     realtimeLightningManager.strikeMarkers.forEach((markerData, id) => {
-        const strikeId = `rt-${id}`; // Creem un ID únic per a les dades en temps real
-        if (!combinedStrikes.has(strikeId)) {
-            combinedStrikes.set(strikeId, {
-                lat: markerData.marker.getLatLng().lat,
-                lon: markerData.marker.getLatLng().lng,
-                timestamp: markerData.timestamp
-            });
+        if (markerData.timestamp >= timeCutoff) {
+            const strikeId = `rt-${id}`;
+            if (!combinedStrikes.has(strikeId)) {
+                combinedStrikes.set(strikeId, {
+                    lat: markerData.marker.getLatLng().lat,
+                    lon: markerData.marker.getLatLng().lng,
+                    timestamp: markerData.timestamp
+                });
+            }
         }
     });
 
@@ -2762,8 +2780,8 @@ function getCombinedLightningData() {
 // ===================================================================
 
 // Capa de Leaflet per dibuixar les cèl·lules detectades
-const cellulesTempestaLayer = L.layerGroup().addTo(map);
-const ljIconsLayer = L.layerGroup().addTo(map); // <-- AFEGEIX AQUESTA LÍNIA
+const cellulesTempestaLayer = L.layerGroup({ pane: 'poligonsPane' }).addTo(map);
+const ljIconsLayer = L.layerGroup({ pane: 'iconesPane' }).addTo(map);
 
 
 /**
@@ -2772,7 +2790,7 @@ const ljIconsLayer = L.layerGroup().addTo(map); // <-- AFEGEIX AQUESTA LÍNIA
  * @param {number} resolution - La mida de cada cel·la de la graella (en graus).
  * @returns {Map} - Un mapa on cada clau és "lat_lon" i el valor és un array de llamps.
  */
-function rasteritzarLlamps(historicStrikes, resolution = 0.02) { // CANVI: Resolució més fina (~1x1 km)
+function rasteritzarLlamps(historicStrikes, resolution = 0.03) { // CANVI: Resolució més fina (~1x1 km)
     const grid = new Map();
     historicStrikes.forEach(llamp => {
         const gridX = Math.floor(llamp.lon / resolution);
@@ -2841,26 +2859,27 @@ function identificarCelules(grid) {
 function analitzarCadaCelula(celules, totesLesDades) {
     const now = Date.now();
     const totalMinutes = 120;
-    const bins = totalMinutes / 2; // 60 bins de 2 minuts
+    const bins = totalMinutes / 2;
+    const tempsLimitActivitat = now - (20 * 60 * 1000);
 
+    // Es prepara cada cèl·lula per a l'anàlisi
     celules.forEach(cell => {
         cell.pixelKeys = new Set(cell.pixels.map(p => {
             const gridX = Math.floor(p.lon / 0.01);
             const gridY = Math.floor(p.lat / 0.01);
             return `${gridX}_${gridY}`;
         }));
-
         cell.recomptesComplets = new Array(bins).fill(0);
     });
 
+    // S'omplen els recomptes de llamps per a cada cèl·lula
     totesLesDades.forEach(llamp => {
         const ageMinutes = Math.floor((now - llamp.timestamp) / 60000);
         if (ageMinutes < totalMinutes) {
-            const cellCorresponent = celules.find(c => {
-                const gridX = Math.floor(llamp.lon / 0.01);
-                const gridY = Math.floor(llamp.lat / 0.01);
-                return c.pixelKeys.has(`${gridX}_${gridY}`);
-            });
+            const gridX = Math.floor(llamp.lon / 0.01);
+            const gridY = Math.floor(llamp.lat / 0.01);
+            const key = `${gridX}_${gridY}`;
+            const cellCorresponent = celules.find(c => c.pixelKeys.has(key));
             if (cellCorresponent) {
                 const binIndex = bins - 1 - Math.floor(ageMinutes / 2);
                 if (binIndex >= 0 && binIndex < bins) {
@@ -2870,30 +2889,12 @@ function analitzarCadaCelula(celules, totesLesDades) {
         }
     });
 
+    // S'executa l'anàlisi de salts per a cada cèl·lula
     celules.forEach(cell => {
-        // ===================================================================
-        // CANVI CLAU: Adaptem el llindar al retard de les dades
-        // ===================================================================
-        // En lloc de mirar l'últim bin (índex 59), que pot estar incomplet,
-        // mirem el penúltim (índex 58), que representa l'interval de fa 2 a 4 minuts.
-        const binPerComprovar = bins - 2; // Correspon a l'índex 58
+        cell.esActiva = cell.strikes.some(llamp => llamp.timestamp >= tempsLimitActivitat);
         
-        if (binPerComprovar < 0) { // Només per seguretat
-            cell.saltN1 = [];
-            cell.saltN2 = [];
-            return;
-        }
-
-        const flashRate = cell.recomptesComplets[binPerComprovar] / 2; // Taxa mitjana en llamps/minut
-        
-        // Apliquem el llindar de 10 llamps/minut sobre aquest bin ja complet
-        if (flashRate < 10) {
-            cell.saltN1 = [];
-            cell.saltN2 = [];
-            return; // La cèl·lula no és prou activa, no s'analitza
-        }
-        
-        // Si se supera el llindar, l'anàlisi de salts continua com abans
+        // CORRECCIÓ: Ja no apliquem el filtre de 'compleixLlindarActivitat' aquí.
+        // La funció 'detectarSaltsHistòrics' ja conté el seu propi llindar d'intensitat.
         cell.saltN1 = detectarSaltsHistòrics(cell.recomptesComplets, 1.5);
         cell.saltN2 = detectarSaltsHistòrics(cell.recomptesComplets, 2.0);
     });
@@ -2903,73 +2904,89 @@ function analitzarCadaCelula(celules, totesLesDades) {
 
 
 /**
- * VERSIÓ FINAL: Dibuixa les cèl·lules, manté el color d'alerta
- * i afegeix una icona personalitzada al centre de les que tenen un LJ.
+ * VERSIÓ FINAL: Dibuixa les cèl·lules actives, mostra la seva trajectòria,
+ * i manté un estat visual per a aquelles que han tingut un LJ en el passat.
  */
 function visualitzarCelules(celulesAnalitzades) {
     cellulesTempestaLayer.clearLayers();
-    ljIconsLayer.clearLayers(); // Neteja les icones antigues abans de dibuixar les noves
-
-    // Definim la nostra icona personalitzada per a l'alerta de LJ
-    const ljIcon = L.icon({
-        iconUrl: 'imatges/LJ.png', // Assegura't que aquesta ruta sigui correcta
-        iconSize: [35, 35],       // Mida de la icona en píxels [amplada, alçada]
-        iconAnchor: [17, 17],     // Punt de la icona que correspon a la coordenada
-        popupAnchor: [0, -17]     // On s'obrirà el popup en relació a la icona
-    });
+    ljIconsLayer.clearLayers();
+    const ljIcon = L.icon({ iconUrl: 'imatges/LJ.png', iconSize: [35, 35], iconAnchor: [17, 17], popupAnchor: [0, -17] });
 
     celulesAnalitzades.forEach(cell => {
+        const teSaltN2Històric = cell.saltN2.length > 0;
+        const teSaltN1Històric = cell.saltN1.length > 0;
+        
+        if (!cell.esActiva && !teSaltN1Històric && !teSaltN2Històric) { return; }
+
         const points = cell.pixels.map(p => [p.lon, p.lat]);
         if (points.length < 3) return;
-
         const featureCollection = turf.featureCollection(points.map(p => turf.point(p)));
         const hull = turf.convex(featureCollection);
         if (!hull) return;
 
-        const teSaltN2 = cell.saltN2.length > 0;
-        const teSaltN1 = cell.saltN1.length > 0;
-
-        let estilPoligon = { color: '#0095f9', weight: 2, fillOpacity: 0.3 };
-        let popupText = `<b>Estat: Normal</b>`;
-
-        if (teSaltN2) {
-            estilPoligon = { color: '#ff0000', weight: 3, fillOpacity: 0.4, dashArray: '1' };
-            popupText = `<b><span style="color:red;">LJ Sever (N2) Detectat</span></b>`;
-        } else if (teSaltN1) {
-            estilPoligon = { color: '#ff8c00', weight: 2, fillOpacity: 0.35, dashArray: '5, 5' };
-            popupText = `<b><span style="color:darkorange;">LJ Sensible (N1) Detectat</span></b>`;
+        // Finestra per a considerar un salt "actiu" (últims 15-20 minuts)
+        const llindarIndexRecent = 50; 
+        
+        const saltN2Actiu = cell.saltN2.some(s => s.index >= llindarIndexRecent);
+        const saltN1Actiu = cell.saltN1.some(s => s.index >= llindarIndexRecent);
+        
+        let estilPoligon, popupText, mostraIcona = false;
+        
+        if (saltN2Actiu) {
+            estilPoligon = { color: '#ff0000', weight: 3, fillOpacity: 0.4 };
+            popupText = `<b><span style="color:red;">LJ Sever (N2) ACTIU</span></b>`;
+            mostraIcona = true;
+        } else if (saltN1Actiu) {
+            estilPoligon = { color: '#ff8c00', weight: 2, fillOpacity: 0.35 };
+            popupText = `<b><span style="color:darkorange;">LJ Sensible (N1) ACTIU</span></b>`;
+            mostraIcona = true;
+        } else if (teSaltN2Històric) {
+            estilPoligon = { color: '#8b0000', weight: 1, fillOpacity: 0.2, dashArray: '10, 10' };
+            popupText = `<b>Estat: Post-Salt Sever (N2)</b>`;
+        } else if (teSaltN1Històric) {
+            estilPoligon = { color: '#b5651d', weight: 1, fillOpacity: 0.2, dashArray: '10, 10' };
+            popupText = `<b>Estat: Post-Salt Sensible (N1)</b>`;
+        } else {
+            popupText = `<b>Estat: Activa</b>`;
+            estilPoligon = { color: '#0095f9', weight: 2, fillOpacity: 0.2 };
         }
 
         const poligonLayer = L.geoJSON(hull, { style: estilPoligon });
         
-        poligonLayer.on('click', () => {
-            const labels = Array.from({ length: 60 }, (_, i) => `-${120 - i*2}m`);
-            const saltsCombinats = [...cell.saltN2, ...cell.saltN1];
-            mostrarGrafic(labels, cell.recomptesComplets, saltsCombinats);
-        });
-        
+        const recompteUltims10min = cell.recomptesComplets.slice(-5).reduce((a, b) => a + b, 0);
         const popupContent = `
             <b>Cèl·lula de Tempesta</b><br>
-            Llamps (últims 20 min): ${cell.strikes.length}<br>
             ${popupText}<br>
-            <em>(Fes clic per veure l'historial complet)</em>
+            <hr style="margin: 4px 0;">
+            Llamps (últims 20 min): <b>${cell.strikes.length}</b><br>
+            Llamps (últims 10 min): <b>${recompteUltims10min}</b>
+            <br><em>(Fes clic per veure l'historial)</em>
         `;
-        poligonLayer.bindPopup(popupContent);
+        
+        // AFEGIT EL CODI QUE FALTAVA
+        poligonLayer.bindPopup(popupContent).on('click', () => {
+             const labels = Array.from({ length: 60 }, (_, i) => `-${120 - i*2}m`);
+             const saltsCombinats = [...cell.saltN2, ...cell.saltN1];
+             mostrarGrafic(labels, cell.recomptesComplets, saltsCombinats);
+        });
         cellulesTempestaLayer.addLayer(poligonLayer);
 
-        // ===================================================================
-        // NOU BLOC: AFEGIM LA ICONA SI HI HA UN SALT
-        // ===================================================================
-        if (teSaltN2 || teSaltN1) {
-            // Calculem el centre del polígon de la tempesta
-            const centroid = turf.centroid(hull);
-            const centroidCoords = [centroid.geometry.coordinates[1], centroid.geometry.coordinates[0]]; // Lat, Lon
-            
-            // Creem un marcador amb la nostra icona personalitzada i l'afegim al mapa
+        // AFEGIT EL CODI QUE FALTAVA
+        if (cell.trajectoria && cell.trajectoria.length > 1) {
+            const trajectoriaLatLng = cell.trajectoria.map(coords => [coords[1], coords[0]]);
+            L.polyline(trajectoriaLatLng, { color: 'white', weight: 2, opacity: 0.7, dashArray: '5, 5' }).addTo(cellulesTempestaLayer);
+        }
+
+        // AFEGIT EL CODI QUE FALTAVA
+        if (mostraIcona) {
+            // Aquesta línia estava a la teva versió anterior del codi i s'havia perdut
+            if (!cell.centroide) cell.centroide = turf.centroid(hull);
+
+            const centroidCoords = [cell.centroide.geometry.coordinates[1], cell.centroide.geometry.coordinates[0]];
             L.marker(centroidCoords, { icon: ljIcon })
                 .addTo(ljIconsLayer)
-                .bindPopup(popupContent) // També li afegim el popup
-                .on('click', () => { // I l'esdeveniment de clic per obrir el gràfic
+                .bindPopup(popupContent)
+                .on('click', () => {
                     const labels = Array.from({ length: 60 }, (_, i) => `-${120 - i*2}m`);
                     const saltsCombinats = [...cell.saltN2, ...cell.saltN1];
                     mostrarGrafic(labels, cell.recomptesComplets, saltsCombinats);
@@ -2979,19 +2996,64 @@ function visualitzarCelules(celulesAnalitzades) {
 }
 
 /**
+ * Compares current cells with previous ones to give them
+ * a persistent identity (tracking).
+ * @param {Array} celulesActuals - The cells detected in the current minute.
+ * @param {Array} celulesAnteriors - The cells from the previous analysis.
+ * @returns {Array} The current cells with their history and ID inherited.
+ */
+function ferSeguimentDeCelules(celulesActuals, celulesAnteriors) {
+    // CORRECCIÓ: Ens assegurem que totes les cèl·lules, noves o velles, tinguin un centroide
+    celulesActuals.forEach(actual => {
+        if (!actual.centroide) { // Comprovem si ja en té abans de calcular
+            actual.centroide = turf.centroid(turf.featureCollection(actual.pixels.map(p => turf.point([p.lon, p.lat]))));
+        }
+    });
+
+    if (celulesAnteriors.length === 0) {
+        celulesActuals.forEach(actual => {
+            actual.trajectoria = [actual.centroide.geometry.coordinates];
+        });
+        return celulesActuals;
+    }
+
+    const celulesSeguides = celulesActuals.map(actual => {
+        let millorCandidat = null;
+        let distanciaMinima = Infinity;
+
+        celulesAnteriors.forEach(anterior => {
+            // Assegurem que la cèl·lula anterior també té centroide
+            if (!anterior.centroide) return;
+            const distancia = turf.distance(actual.centroide, anterior.centroide);
+            if (distancia < distanciaMinima) {
+                distanciaMinima = distancia;
+                millorCandidat = anterior;
+            }
+        });
+        
+        if (millorCandidat && distanciaMinima < 20) {
+            actual.id = millorCandidat.id;
+            const baseTrajectoria = Array.isArray(millorCandidat.trajectoria) ? millorCandidat.trajectoria : [];
+            actual.trajectoria = [...baseTrajectoria, actual.centroide.geometry.coordinates];
+        } else {
+            actual.trajectoria = [actual.centroide.geometry.coordinates];
+        }
+        return actual;
+    });
+
+    return celulesSeguides;
+}
+
+/**
  * FUNCIÓ ORQUESTRADORA PRINCIPAL (VERSIÓ REFINADA)
  * Executa el procés filtrant primer per llamps recents.
  */
 function analitzarTempestesSMC() {
-    console.log("Iniciant anàlisi automàtica de cèl·lules de tempesta...");
-
-    // PAS 1: Fusionem les dades en temps real amb les històriques
+    console.log("Iniciant anàlisi de cèl·lules ACTIVES amb reconstrucció de trajectòria...");
     const dadesCompletes = getCombinedLightningData();
 
-    // Filtrem per llamps dels últims 20 minuts per identificar cèl·lules actives
     const now = Date.now();
-    const minutsRecents = 20;
-    const tempsLimit = now - (minutsRecents * 60 * 1000);
+    const tempsLimit = now - (20 * 60 * 1000); // Finestra de 20 min per identificar
     
     const llampsRecents = new Map();
     dadesCompletes.forEach((llamp, id) => {
@@ -3002,12 +3064,11 @@ function analitzarTempestesSMC() {
     
     const graella = rasteritzarLlamps(llampsRecents);
     const celules = identificarCelules(graella);
-
-    // PAS 2: Passem les dades completes a la següent funció per a una anàlisi retrospectiva total
+    
     const celulesAnalitzades = analitzarCadaCelula(celules, dadesCompletes);
-
     visualitzarCelules(celulesAnalitzades);
-    console.log(`Anàlisi completada. S'han trobat ${celules.length} cèl·lules significatives.`);
+    
+    console.log(`Anàlisi completada. S'han trobat ${celulesAnalitzades.length} cèl·lules actives.`);
 }
 
 /**
@@ -3159,11 +3220,11 @@ const realtimeLightningManager = {
     socketBo: null, // Per a Blitzortung.org
     strikeMarkers: new Map(),
     updateInterval: null,
-    layerGroup: L.layerGroup(),
+    layerGroup: L.layerGroup({ pane: 'llampsPane' }),
 
     // Propietats per a les dades històriques i les capes de resum
     historicStrikes: new Map(),
-    historicLayerGroup: L.layerGroup(),
+    historicLayerGroup: L.layerGroup({ pane: 'llampsPane' }),
     historicUpdateInterval: null,
     timeFilterMinutes: 120,
     layer1h: null,
@@ -3273,38 +3334,56 @@ const realtimeLightningManager = {
     },
 
     // Funció unificada per afegir qualsevol llamp al mapa
-    addStrike: function(strike) {
-        if (this.strikeMarkers.has(strike.id) || !strike.lat || !strike.lon) return;
-        const flashStyle = { radius: 30, fillColor: "#FFFFFF", fillOpacity: 0.8, weight: 0, pane: 'markerPane' };
-        const marker = L.circleMarker([strike.lat, strike.lon], flashStyle);
-        const markerData = { marker: marker, timestamp: new Date().getTime() };
-        this.strikeMarkers.set(strike.id, markerData);
-        this.layerGroup.addLayer(marker);
-        setTimeout(() => { if (this.strikeMarkers.has(strike.id)) this.updateMarkerStyle(markerData, 0); }, 250);
-        this.createExpandingCircle(strike.lat, strike.lon);
-    },
+addStrike: function(strike) {
+    if (this.strikeMarkers.has(strike.id) || !strike.lat || !strike.lon) return;
+
+    // CORRECCIÓ: Especifiquem el 'pane' correcte aquí
+    const flashStyle = { radius: 30, fillColor: "#FFFFFF", fillOpacity: 0.8, weight: 0, pane: 'llampsPane' };
+    
+    const marker = L.circleMarker([strike.lat, strike.lon], flashStyle);
+    const markerData = { marker: marker, timestamp: new Date().getTime() };
+    this.strikeMarkers.set(strike.id, markerData);
+    this.layerGroup.addLayer(marker);
+    
+    setTimeout(() => { if (this.strikeMarkers.has(strike.id)) this.updateMarkerStyle(markerData, 0); }, 250);
+    this.createExpandingCircle(strike.lat, strike.lon);
+},
 
     // Funcions per a la visualització dels llamps en temps real
-    updateMarkers: function() {
-        const now = new Date().getTime();
-        this.strikeMarkers.forEach((markerData, strikeId) => {
-            const ageMins = (now - markerData.timestamp) / 60000;
-            if (ageMins > this.MAX_AGE_MINS) {
-                this.layerGroup.removeLayer(markerData.marker);
-                this.strikeMarkers.delete(strikeId);
-            } else {
-                this.updateMarkerStyle(markerData, ageMins);
-            }
-        });
-    },
+updateMarkers: function() {
+    const now = new Date().getTime();
+    
+    // El temps màxim de vida ara depèn del valor del slider quan el mode històric està actiu
+    // Si no està en mode històric, es manté el màxim de 30 minuts.
+    const maxAgeMins = this.currentMode === 'historic' ? this.timeFilterMinutes : this.MAX_AGE_MINS;
 
-    updateMarkerStyle: function(markerData, ageMins = 0) {
-        const color = this.getColorForAge(ageMins);
-        markerData.marker.setStyle({
-            fillColor: color, color: "#000000", fillOpacity: 0.9, opacity: 0.9,
-            weight: 0.5, radius: 6 - (ageMins / this.MAX_AGE_MINS) * 4
-        });
-    },
+    this.strikeMarkers.forEach((markerData, strikeId) => {
+        const ageMins = (now - markerData.timestamp) / 60000;
+        if (ageMins > maxAgeMins) {
+            this.layerGroup.removeLayer(markerData.marker);
+            this.strikeMarkers.delete(strikeId);
+        } else {
+            // L'estil dels llamps en temps real continua basant-se en l'escala de 30 min
+            this.updateMarkerStyle(markerData, ageMins);
+        }
+    });
+},
+
+updateMarkerStyle: function(markerData, ageMins = 0) {
+    const color = this.getColorForAge(ageMins);
+    
+    // CORRECCIÓ: Hem esborrat una barra baixa extra de "MAX_AGE_MINS"
+    const radius = 4 - (ageMins / this.MAX_AGE_MINS) * 2; 
+    
+    markerData.marker.setStyle({
+        fillColor: color, 
+        color: "#000000", 
+        fillOpacity: 0.9, 
+        opacity: 0.9,
+        weight: 0.5, 
+        radius: radius
+    });
+},
     
     getColorForAge: function(ageMins) {
         if (ageMins < 2) return '#FFFF00';
@@ -3422,28 +3501,31 @@ fetchHistoricLightning: async function() {
     }
 },
 
-    updateHistoricMarkers: function() {
-        this.historicLayerGroup.clearLayers();
-        const now = new Date().getTime();
-        const timeFilterMs = this.timeFilterMinutes * 60 * 1000;
-        this.historicStrikes.forEach(strike => {
-            const ageMs = now - strike.timestamp;
-            if (ageMs <= timeFilterMs) {
-                const ageMins = ageMs / 60000;
-                const color = this.getHistoricColorForAge(ageMins);
-                const radius = 5 - (ageMins / 120) * 3;
-                const marker = L.circleMarker([strike.lat, strike.lon], {
-                    radius: radius,
-                    fillColor: color,
-                    color: '#000000',
-                    weight: 0.5,
-                    opacity: 0.9,
-                    fillOpacity: 0.9
-                });
-                this.historicLayerGroup.addLayer(marker);
-            }
-        });
-    },
+// Dins de l'objecte realtimeLightningManager
+updateHistoricMarkers: function() {
+    this.historicLayerGroup.clearLayers();
+    const now = new Date().getTime();
+    const timeFilterMs = this.timeFilterMinutes * 60 * 1000;
+    this.historicStrikes.forEach(strike => {
+        const ageMs = now - strike.timestamp;
+        if (ageMs <= timeFilterMs) {
+            const ageMins = ageMs / 60000;
+            const color = this.getHistoricColorForAge(ageMins);
+            const radius = 4 - (ageMins / 120) * 2.5; // Mida petita
+            
+            const marker = L.circleMarker([strike.lat, strike.lon], {
+                radius: radius,
+                fillColor: color,
+                color: '#000000',
+                weight: 0.5,
+                opacity: 0.9,
+                fillOpacity: 0.9,
+                pane: 'llampsPane' // CORRECCIÓ: Especifiquem el 'pane' correcte aquí
+            });
+            this.historicLayerGroup.addLayer(marker);
+        }
+    });
+},
 
     getHistoricColorForAge: function(ageMins) {
         if (ageMins < 5) return '#FFFFFF';
