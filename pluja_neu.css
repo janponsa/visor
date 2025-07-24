@@ -725,3 +725,89 @@ body > *:not(#map):not(.leaflet-container):not(.leaflet-control-container) {
 #chart-header button:hover {
     background: #ddd;
 }
+.projection-marker {
+    background-color: rgba(0, 0, 0, 0.6);
+    border: 1px solid #fff;
+    border-radius: 50%;
+    color: #fff;
+    font-size: 11px;
+    font-weight: bold;
+    text-align: center;
+    line-height: 28px; /* Per centrar verticalment el text */
+}
+.temps-projeccio-label {
+    background-color: rgba(0, 0, 0, 0.6);
+    color: white;
+    font-size: 12px;
+    font-weight: bold;
+    border-radius: 4px;
+    text-align: center;
+    line-height: 20px;
+    white-space: nowrap;
+}
+/* ====================================================== */
+/* NOU: Estils per a l'Alerta de Temps Violent              */
+/* ====================================================== */
+
+#storm-alert-overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100vw;
+    height: 100vh;
+    z-index: 99999999;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    background-color: transparent;
+    pointer-events: none; /* No interfereix amb el mapa */
+    opacity: 0;
+    transition: opacity 0.5s ease-out;
+}
+
+#storm-alert-overlay.visible {
+    opacity: 1;
+    pointer-events: auto; /* Permet tancar-la si es fa clic */
+    animation: flash-red 1.5s ease-out;
+}
+
+@keyframes flash-red {
+    0% { background-color: rgba(255, 0, 0, 0); }
+    20% { background-color: rgba(255, 0, 0, 0.4); } /* El flaix apareix ràpid */
+    80% { background-color: rgba(255, 0, 0, 0.4); } /* Es manté el fons vermell */
+    100% { background-color: rgba(255, 0, 0, 0); } /* S'esvaeix al final */
+}
+
+#storm-alert-overlay .alert-content {
+    text-align: center;
+    color: white;
+    text-shadow: 0 0 10px black, 0 0 20px black;
+    transform: scale(0.8);
+    opacity: 0;
+}
+
+#storm-alert-overlay.visible .alert-content {
+    animation: scale-in-fade 1s ease-out 0.2s forwards;
+}
+
+@keyframes scale-in-fade {
+    to {
+        transform: scale(1);
+        opacity: 1;
+    }
+}
+
+#storm-alert-overlay img {
+    width: 150px;
+    margin-bottom: 20px;
+}
+
+#storm-alert-overlay h1 {
+    font-size: 3em;
+    margin: 0;
+}
+
+#storm-alert-overlay #alert-details {
+    font-size: 1.5em;
+    margin-top: 15px;
+}

@@ -15,11 +15,22 @@
 <body>
 
   <div id="loading-screen">
-    <img src="/imatges/logo_blanc.png" alt="Projecte 4 Estacions">
+    <img src="imatges/logo_blanc.png" alt="Projecte 4 Estacions">
     <div class="welcome-text">
       Benvingut al visor de dades en temps real 4E MeteoMAP
     </div>
   </div>
+
+  <div id="storm-alert-overlay">
+    <div class="alert-content">
+        <img src="imatges/LJ.png" alt="Alerta de Lightning Jump">
+        <h1 id="alert-title"></h1>
+        <div id="alert-details">
+            <p><strong>Localització estimada:</strong> <span id="alert-location"></span></p>
+            <p><strong>Llamps (últims 10 min):</strong> <span id="alert-strikes"></span></p>
+        </div>
+    </div>
+</div>
 
 <div id="sumatori-controls" style="display: none;">
     <label for="start-date">Des del dia:</label>

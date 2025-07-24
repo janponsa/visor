@@ -51,8 +51,10 @@ const lightningJumpPlugin = {
 
 const RASTER_RESOLUTION = 0.02; // Mida de la cel·la de la graella en graus
 let isAutoDetectMode = true; // Comencem en mode automàtic per defecte
-
 let celulesAnteriors = []; // Guardarà les cèl·lules de l'últim minut
+let alertedStormIds = new Set();
+let alertQueue = [];
+let isAlertAnimating = false;
 
 function toggleAnalysisMode() {
     if (isAutoDetectMode) {
@@ -487,7 +489,7 @@ function updateZoomRestrictions() {
 }
 
 map.on('baselayerchange', updateZoomRestrictions);
-baseLayers.Meteocat.addTo(map); // Afegeix una capa base per defecte
+baseLayers["ICGC (JSON) Límits Administratius"].addTo(map); // Afegeix una capa base per defecte
 
 // Capa WMS ICGC Allaus
 const wmsLayer = L.tileLayer.wms("https://geoserveis.icgc.cat/geoserver/nivoallaus/wms", {
@@ -2712,21 +2714,17 @@ let analisisPolygon = null; // Variable global per guardar el polígon actiu
 let lightningChart = null;  // Variable global per al gràfic
 
 /**
- * Analitza una sèrie de recomptes i retorna un array amb la posició
- * i la intensitat (sigma) dels salts que superen un llindar determinat.
- * @param {number[]} recomptes - Array de recomptes (ara en intervals de 2 min).
- * @param {number} sigmaThreshold - El llindar de desviacions estàndard per a considerar un salt (p. ex., 2.0 o 1.5).
- * @returns {Array} - Un array amb els objectes dels salts detectats.
+ * VERSIÓ SENSE EL CRITERI DE PERSISTÈNCIA.
+ * Més sensible i ràpid, però amb més risc de falses alarmes.
  */
-function detectarSaltsHistòrics(recomptes, sigmaThreshold = 2.0) {
+function detectarSaltsHistòrics(recomptes, sigmaThreshold = 2.0, flashRateThreshold = 8) {
     const saltsDetectats = [];
-    const periodeCalculBins = 6; 
-    const minLlampsPerBin = 10;   
+    const periodeCalculBins = 7; // 14 minuts de referència
+    const minLlampsPerBin = 10;
 
+    // Aquesta vegada, el bucle pot anar fins al final de l'array
     for (let i = periodeCalculBins; i < recomptes.length; i++) {
         const dadesReferencia = recomptes.slice(i - periodeCalculBins, i);
-        
-        // CORRECCIÓ AQUÍ: La funció 'reduce' ara suma correctament els valors.
         const suma = dadesReferencia.reduce((a, b) => a + b, 0);
         const mitjana = suma / dadesReferencia.length;
 
@@ -2738,10 +2736,17 @@ function detectarSaltsHistòrics(recomptes, sigmaThreshold = 2.0) {
 
         if (desviacioEstandard < 1) continue;
 
-        const llindar = mitjana + (sigmaThreshold * desviacioEstandard);
+        const llindarEstadistic = mitjana + (sigmaThreshold * desviacioEstandard);
         const valorActual = recomptes[i];
+        const taxaDeLlampsActual = valorActual / 2;
 
-        if (valorActual > llindar && valorActual >= minLlampsPerBin) {
+        // Comprovem les condicions del salt (sense la persistència)
+        if (valorActual > llindarEstadistic && valorActual >= minLlampsPerBin && taxaDeLlampsActual >= flashRateThreshold) {
+            
+            // =================================================================
+            // S'HA ELIMINAT LA COMPROVACIÓ DE PERSISTÈNCIA.
+            // El salt es confirma a l'instant si compleix les altres condicions.
+            // =================================================================
             const sigma = (valorActual - mitjana) / desviacioEstandard;
             saltsDetectats.push({ index: i, sigma: sigma });
         }
@@ -2856,9 +2861,7 @@ function identificarCelules(grid) {
 }
 
 /**
- * 3. ANÀLISI PER CÈL·LULA: Aplica el detector de LJ a cada cèl·lula.
- * @param {Array} celules - L'array de cèl·lules de tempesta.
- * @returns {Array} - El mateix array, però amb la informació de l'anàlisi afegida.
+ * VERSIÓ FINAL AMB FILTRE D'ACTIVITAT MÉS ESTRICTE
  */
 function analitzarCadaCelula(celules, totesLesDades) {
     const now = Date.now();
@@ -2866,8 +2869,10 @@ function analitzarCadaCelula(celules, totesLesDades) {
     const bins = totalMinutes / 2;
     const tempsLimitActivitat = now - (20 * 60 * 1000);
 
+    // Llindar mínim de llamps per considerar una cèl·lula activa
+    const MINIM_LLAMPS_PER_ACTIVITAT = 5;
+
     celules.forEach(cell => {
-        // CORRECCIÓ: Utilitzem la constant per a consistència
         cell.pixelKeys = new Set(cell.pixels.map(p => {
             const gridX = Math.floor(p.lon / RASTER_RESOLUTION);
             const gridY = Math.floor(p.lat / RASTER_RESOLUTION);
@@ -2880,7 +2885,6 @@ function analitzarCadaCelula(celules, totesLesDades) {
         const gridX = Math.floor(llamp.lon / RASTER_RESOLUTION);
         const gridY = Math.floor(llamp.lat / RASTER_RESOLUTION);
         const key = `${gridX}_${gridY}`;
-        
         const cellCorresponent = celules.find(c => c.pixelKeys.has(key));
         if (cellCorresponent) {
             const ageMinutes = Math.floor((now - llamp.timestamp) / 60000);
@@ -2894,112 +2898,431 @@ function analitzarCadaCelula(celules, totesLesDades) {
     });
 
     celules.forEach(cell => {
-        cell.esActiva = cell.strikes.some(llamp => llamp.timestamp >= tempsLimitActivitat);
-        cell.saltN1 = detectarSaltsHistòrics(cell.recomptesComplets, 1.5);
-        cell.saltN2 = detectarSaltsHistòrics(cell.recomptesComplets, 2.0);
-        const binPerComprovar = bins - 2;
-        if (binPerComprovar >= 0) {
-            const flashRate = cell.recomptesComplets[binPerComprovar] / 2;
-            cell.compleixLlindarActivitat = (flashRate >= 10);
+        // =================================================================
+        // NOU CÀLCUL D'ACTIVITAT MÉS ESTRICTE
+        // =================================================================
+        const llampsRecents = cell.strikes.filter(llamp => llamp.timestamp >= tempsLimitActivitat);
+        cell.esActiva = llampsRecents.length >= MINIM_LLAMPS_PER_ACTIVITAT;
+        // Guardem el recompte per mostrar-lo al popup
+        cell.llampsUltims20min = llampsRecents.length;
+        // =================================================================
+        
+        const MINUTS_MINIMS_PER_ANALISI_LJ = 14;
+        if (cell.trajectoria && cell.trajectoria.length >= MINUTS_MINIMS_PER_ANALISI_LJ) {
+            cell.saltN1 = detectarSaltsHistòrics(cell.recomptesComplets, 1.5, 6);
+            cell.saltN2 = detectarSaltsHistòrics(cell.recomptesComplets, 2.0, 10);
         } else {
-            cell.compleixLlindarActivitat = false;
+            cell.saltN1 = [];
+            cell.saltN2 = [];
+        }
+
+        const dadesTendencia = cell.recomptesComplets.slice(-15);
+        if (dadesTendencia.length > 5) {
+            const tendencia = calcularTendenciaLineal(dadesTendencia);
+            const taxaMitjanaRecent = dadesTendencia.reduce((a, b) => a + b, 0) / (dadesTendencia.length * 2);
+            if (tendencia > 0.15) {
+                cell.faseDelCicle = 'Creixement / Intensificació';
+            } else if (tendencia < -0.15) {
+                cell.faseDelCicle = 'Dissipació';
+            } else if (taxaMitjanaRecent > 10) {
+                cell.faseDelCicle = 'Maduració';
+            } else {
+                cell.faseDelCicle = 'Estable / Dèbil';
+            }
+        } else {
+            cell.faseDelCicle = 'Cicle de vida curt';
         }
     });
 
     return celules;
 }
 
+/**
+ * VERSIÓ REFORÇADA: Manté un registre de totes les cèl·lules seguides per no perdre-les
+ * quan es debiliten temporalment.
+ */
+function analitzarTempestesRetrospectivament(dadesCompletes) {
+    console.log("Iniciant anàlisi RETROSPECTIVA (versió reforçada)...");
+
+    const ara = Date.now();
+    const intervalMinuts = 2;
+    const totalPassos = 120 / intervalMinuts;
+    
+    let celulesPrevies = [];
+    const registreTotalDeCelules = new Map(); // Un mapa per guardar totes les cèl·lules úniques pel seu ID
+
+    for (let i = 0; i < totalPassos; i++) {
+        const tempsFiPas = ara - ((totalPassos - 1 - i) * intervalMinuts * 60000);
+        const tempsIniciPas = tempsFiPas - (10 * 60 * 1000);
+
+        const llampsDelPas = new Map();
+        dadesCompletes.forEach((llamp, id) => {
+            if (llamp.timestamp >= tempsIniciPas && llamp.timestamp < tempsFiPas) {
+                llampsDelPas.set(id, llamp);
+            }
+        });
+
+        const graella = rasteritzarLlamps(llampsDelPas);
+        let celulesActualsPas = identificarCelules(graella);
+
+        if (celulesActualsPas.length > 0) {
+            celulesActualsPas = ferSeguimentDeCelules(celulesActualsPas, celulesPrevies);
+            
+            // Guardem o actualitzem cada cèl·lula seguida en el nostre registre total
+            celulesActualsPas.forEach(cell => {
+                registreTotalDeCelules.set(cell.id, cell);
+            });
+            
+            celulesPrevies = celulesActualsPas;
+        }
+    }
+    
+    const celulesFinals = Array.from(registreTotalDeCelules.values());
+
+    if (celulesFinals.length > 0) {
+        console.log(`Anàlisi retrospectiva completada. Total de cèl·lules seguides: ${celulesFinals.length}.`);
+        const celulesAnalitzades = analitzarCadaCelula(celulesFinals, dadesCompletes);
+        visualitzarCelules(celulesAnalitzades);
+    } else {
+        console.log("Anàlisi retrospectiva: No s'han trobat cèl·lules significatives.");
+        cellulesTempestaLayer.clearLayers();
+        ljIconsLayer.clearLayers();
+    }
+}
+
 
 /**
- * VERSIÓ FINAL: Dibuixa les cèl·lules actives, mostra la seva trajectòria,
- * i manté un estat visual per a aquelles que han tingut un LJ en el passat.
+ * VERSIÓ FINAL AVANÇADA: Retorna la desviació de la direcció per a un factor d'eixamplament dinàmic.
+ */
+function calcularTrajectoriaFutura(celula, minutsAnalisi = 15, minutsProjeccio = 60) {
+    // La funció es manté igual fins al càlcul de moviments
+    const trajectoria = celula.trajectoria;
+    if (!trajectoria || trajectoria.length < 2) return null;
+    const puntsRecents = trajectoria.slice(-minutsAnalisi);
+    if (puntsRecents.length < 2) return null;
+    let totalDistanciaKm = 0, totalTempsMinuts = 0, moviments = [];
+    for (let i = 0; i < puntsRecents.length - 1; i++) {
+        const puntA = turf.point(puntsRecents[i]);
+        const puntB = turf.point(puntsRecents[i + 1]);
+        const distanciaSegment = turf.distance(puntA, puntB, { units: 'kilometers' });
+        if (distanciaSegment > 0.01) {
+            const direccioSegment = turf.bearing(puntA, puntB);
+            totalDistanciaKm += distanciaSegment;
+            totalTempsMinuts += 1;
+            moviments.push({ distancia: distanciaSegment, direccio: direccioSegment });
+        }
+    }
+    if (totalTempsMinuts === 0) return null;
+
+    const velocitatKmPerMinut = totalDistanciaKm / totalTempsMinuts;
+    const velocitatKmh = velocitatKmPerMinut * 60;
+    const VELOCITAT_MAXIMA_REALISTA_KMH = 150;
+    if (velocitatKmh > VELOCITAT_MAXIMA_REALISTA_KMH) {
+        console.warn(`Velocitat irreal detectada (${velocitatKmh.toFixed(0)} km/h). Descartant projecció.`);
+        return null;
+    }
+
+    let sumaX = 0, sumaY = 0;
+    moviments.forEach(mov => {
+        sumaX += Math.cos(mov.direccio * Math.PI / 180);
+        sumaY += Math.sin(mov.direccio * Math.PI / 180);
+    });
+    const direccioMitjana = (Math.atan2(sumaY, sumaX) * 180 / Math.PI + 360) % 360;
+
+    // NOU: Càlcul de la desviació estàndard de la direcció
+    const direccions = moviments.map(m => m.direccio);
+    const n = direccions.length;
+    const mitjanaDir = direccioMitjana; // Usem la mitjana vectorial ja calculada
+    // Calculem la desviació tenint en compte la naturalesa circular dels angles
+    const variancia = direccions.reduce((acc, dir) => {
+        let diff = Math.abs(dir - mitjanaDir);
+        if (diff > 180) diff = 360 - diff; // Corregim per la distància més curta en un cercle
+        return acc + diff * diff;
+    }, 0) / n;
+    const desviacioDireccio = Math.sqrt(variancia);
+
+    if (velocitatKmh < 1) return null;
+
+    const puntFinal = turf.point(puntsRecents[puntsRecents.length - 1]);
+    return {
+        puntInicial: puntFinal,
+        velocitatKmh: velocitatKmh.toFixed(0),
+        direccio: direccioMitjana.toFixed(0),
+        desviacioDireccio: desviacioDireccio, // <-- NOU VALOR RETORNAT
+        velocitatKmPerMinut: velocitatKmPerMinut
+    };
+}
+
+/**
+ * NOVA FUNCIÓ AUXILIAR: Calcula el pendent d'una tendència lineal (regressió lineal).
+ * @param {number[]} dades - Un array de valors numèrics.
+ * @returns {number} El pendent de la línia de tendència.
+ */
+function calcularTendenciaLineal(dades) {
+    const n = dades.length;
+    if (n < 2) return 0; // No es pot calcular la tendència amb menys de 2 punts
+
+    let sumaX = 0, sumaY = 0, sumaXY = 0, sumaXX = 0;
+    for (let i = 0; i < n; i++) {
+        sumaX += i;
+        sumaY += dades[i];
+        sumaXY += i * dades[i];
+        sumaXX += i * i;
+    }
+
+    const pendent = (n * sumaXY - sumaX * sumaY) / (n * sumaXX - sumaX * sumaX);
+    return isNaN(pendent) ? 0 : pendent;
+}
+
+/**
+ * NOVA FUNCIÓ: Busca la comarca on es troba un punt geogràfic.
+ * @param {object} point - Un punt de Turf.js.
+ * @returns {string} El nom de la comarca o 'Desconeguda'.
+ */
+function findComarca(point) {
+    if (typeof comarquesGeojson !== 'undefined') {
+        for (const comarca of comarquesGeojson.features) {
+            if (turf.booleanPointInPolygon(point, comarca.geometry)) {
+                return comarca.properties.NOMCOMAR;
+            }
+        }
+    }
+    return 'Desconeguda';
+}
+
+/**
+ * NOVA FUNCIÓ: Processa la cua d'alertes per mostrar-les una darrere l'altra.
+ */
+function processAlertQueue() {
+    // Si la cua no està buida I no s'està mostrant ja una alerta...
+    if (alertQueue.length > 0 && !isAlertAnimating) {
+        isAlertAnimating = true; // Bloquegem per evitar superposicions
+        const cellToAlert = alertQueue.shift(); // Traiem la primera alerta de la cua
+
+        // Cridem a la funció de l'animació i li passem una funció 'callback'
+        // que s'executarà quan l'animació acabi.
+        triggerStormAlert(cellToAlert, () => {
+            isAlertAnimating = false; // Desbloquegem
+            processAlertQueue();      // Intentem processar la següent alerta de la cua
+        });
+    }
+}
+
+/**
+ * VERSIÓ ACTUALITZADA: L'alerta ara dura 5 segons.
+ */
+function triggerStormAlert(cell, onCompleteCallback) {
+    const overlay = document.getElementById('storm-alert-overlay');
+    if (!overlay) {
+        if (onCompleteCallback) onCompleteCallback();
+        return;
+    }
+
+    const alertTitle = document.getElementById('alert-title');
+    const alertLocation = document.getElementById('alert-location');
+    const alertStrikes = document.getElementById('alert-strikes');
+    
+    const isSevere = cell.saltN2.some(s => s.index >= 50);
+    const levelText = isSevere ? "Sever (N2)" : "Moderat (N1)";
+    const locationName = findComarca(cell.centroide);
+    const strikesCount = cell.recomptesComplets.slice(-5).reduce((a, b) => a + b, 0);
+
+    alertTitle.textContent = `Nova Alerta: Temps Violent ${levelText}`;
+    alertLocation.textContent = locationName;
+    alertStrikes.textContent = strikesCount;
+
+    overlay.classList.add('visible');
+
+    // CANVI: L'alerta s'amaga automàticament després de 5 segons
+    setTimeout(() => {
+        overlay.classList.remove('visible');
+        setTimeout(() => {
+            if (onCompleteCallback) onCompleteCallback();
+        }, 500);
+    }, 5000); // <-- Canviat a 5000
+
+    overlay.onclick = () => {
+        overlay.classList.remove('visible');
+        if (onCompleteCallback) {
+            const tempCallback = onCompleteCallback;
+            onCompleteCallback = null;
+            setTimeout(() => tempCallback(), 500);
+        }
+    };
+}
+
+
+/**
+ * VERSIÓ FINAL AMB FILTRE GEOGRÀFIC PER A LES ALERTES
  */
 function visualitzarCelules(celulesAnalitzades) {
     cellulesTempestaLayer.clearLayers();
     ljIconsLayer.clearLayers();
     const ljIcon = L.icon({ iconUrl: 'imatges/LJ.png', iconSize: [35, 35], iconAnchor: [17, 17], popupAnchor: [0, -17] });
 
+    let newAlertsFound = false;
+
     celulesAnalitzades.forEach(cell => {
+        if (!cell.esActiva) return;
+        
         const teSaltN2Històric = cell.saltN2.length > 0;
         const teSaltN1Històric = cell.saltN1.length > 0;
-        
-        if (!cell.esActiva && !teSaltN1Històric && !teSaltN2Històric) { return; }
-
         const points = cell.pixels.map(p => [p.lon, p.lat]);
         if (points.length < 3) return;
         const featureCollection = turf.featureCollection(points.map(p => turf.point(p)));
         const hull = turf.convex(featureCollection);
         if (!hull) return;
 
-        // Finestra per a considerar un salt "actiu" (últims 15-20 minuts)
         const llindarIndexRecent = 50; 
-        
         const saltN2Actiu = cell.saltN2.some(s => s.index >= llindarIndexRecent);
         const saltN1Actiu = cell.saltN1.some(s => s.index >= llindarIndexRecent);
         
-        let estilPoligon, popupText, mostraIcona = false;
+        const isNowInAlert = saltN2Actiu || saltN1Actiu;
+        const wasAlreadyAlerted = alertedStormIds.has(cell.id);
+
+        // ==================================================================================
+        // NOU FILTRE GEOGRÀFIC PER A LES ALERTES
+        // ==================================================================================
+        if (isNowInAlert && !wasAlreadyAlerted) {
+            if (!cell.centroide) cell.centroide = turf.centroid(hull);
+            const lon = cell.centroide.geometry.coordinates[0];
+            const lat = cell.centroide.geometry.coordinates[1];
+            
+            // Comprovem si la cèl·lula està dins del requadre definit
+            const isInBounds = lat <= 43.4 && lat >= 39.6 && lon <= 5.0 && lon >= -1.2;
+
+            if (isInBounds) {
+                alertQueue.push(cell);
+                alertedStormIds.add(cell.id);
+                newAlertsFound = true;
+                
+                setTimeout(() => {
+                    alertedStormIds.delete(cell.id);
+                }, 30 * 60 * 1000);
+            }
+        }
+        // ==================================================================================
         
+        let estilPoligon, popupText, mostraIcona = false;
         if (saltN2Actiu) {
-            estilPoligon = { color: '#ff0000', weight: 3, fillOpacity: 0.4 };
+            estilPoligon = { color: '#ff0000', weight: 3, fillOpacity: 0.4, lj: 'Sever (N2)' };
             popupText = `<b><span style="color:red;">LJ Sever (N2) ACTIU</span></b>`;
             mostraIcona = true;
         } else if (saltN1Actiu) {
-            estilPoligon = { color: '#ff8c00', weight: 2, fillOpacity: 0.35 };
+            estilPoligon = { color: '#ff8c00', weight: 2, fillOpacity: 0.35, lj: 'Moderat (N1)' };
             popupText = `<b><span style="color:darkorange;">LJ Sensible (N1) ACTIU</span></b>`;
             mostraIcona = true;
         } else if (teSaltN2Històric) {
-            estilPoligon = { color: '#8b0000', weight: 1, fillOpacity: 0.2, dashArray: '10, 10' };
+            estilPoligon = { color: '#9400D3', weight: 2, fillOpacity: 0.25, lj: 'Post-Salt Sever' };
             popupText = `<b>Estat: Post-Salt Sever (N2)</b>`;
         } else if (teSaltN1Històric) {
-            estilPoligon = { color: '#b5651d', weight: 1, fillOpacity: 0.2, dashArray: '10, 10' };
+            estilPoligon = { color: '#D2691E', weight: 2, fillOpacity: 0.25, lj: 'Post-Salt Moderat' };
             popupText = `<b>Estat: Post-Salt Sensible (N1)</b>`;
         } else {
+            estilPoligon = { color: '#0095f9', weight: 2, fillOpacity: 0.2, lj: 'Activa' };
             popupText = `<b>Estat: Activa</b>`;
-            estilPoligon = { color: '#0095f9', weight: 2, fillOpacity: 0.2 };
         }
-
+        
         const poligonLayer = L.geoJSON(hull, { style: estilPoligon });
-        
         const recompteUltims10min = cell.recomptesComplets.slice(-5).reduce((a, b) => a + b, 0);
-        const popupContent = `
-            <b>Cèl·lula de Tempesta</b><br>
-            ${popupText}<br>
-            <hr style="margin: 4px 0;">
-            Llamps (últims 20 min): <b>${cell.strikes.length}</b><br>
-            Llamps (últims 10 min): <b>${recompteUltims10min}</b>
-            <br><em>(Fes clic per veure l'historial)</em>
-        `;
-        
-        // AFEGIT EL CODI QUE FALTAVA
+        const popupContent = `<b>Cèl·lula de Tempesta</b><br>${popupText}<br><hr style="margin: 4px 0;"><b>Fase del cicle:</b> ${cell.faseDelCicle || 'Indeterminada'}<br><b>Llamps (últims 20 min):</b> ${cell.llampsUltims20min}<br><b>Llamps (últims 10 min):</b> ${recompteUltims10min}<br><em>(Fes clic per veure l'historial)</em>`;
         poligonLayer.bindPopup(popupContent).on('click', () => {
              const labels = Array.from({ length: 60 }, (_, i) => `-${120 - i*2}m`);
              const saltsCombinats = [...cell.saltN2, ...cell.saltN1];
              mostrarGrafic(labels, cell.recomptesComplets, saltsCombinats);
         });
         cellulesTempestaLayer.addLayer(poligonLayer);
-
-        // AFEGIT EL CODI QUE FALTAVA
+        
         if (cell.trajectoria && cell.trajectoria.length > 1) {
             const trajectoriaLatLng = cell.trajectoria.map(coords => [coords[1], coords[0]]);
             L.polyline(trajectoriaLatLng, { color: 'white', weight: 2, opacity: 0.7, dashArray: '5, 5' }).addTo(cellulesTempestaLayer);
         }
 
-        // AFEGIT EL CODI QUE FALTAVA
         if (mostraIcona) {
-            // Aquesta línia estava a la teva versió anterior del codi i s'havia perdut
             if (!cell.centroide) cell.centroide = turf.centroid(hull);
-
             const centroidCoords = [cell.centroide.geometry.coordinates[1], cell.centroide.geometry.coordinates[0]];
-            L.marker(centroidCoords, { icon: ljIcon })
-                .addTo(ljIconsLayer)
-                .bindPopup(popupContent)
-                .on('click', () => {
-                    const labels = Array.from({ length: 60 }, (_, i) => `-${120 - i*2}m`);
-                    const saltsCombinats = [...cell.saltN2, ...cell.saltN1];
-                    mostrarGrafic(labels, cell.recomptesComplets, saltsCombinats);
-                });
+            L.marker(centroidCoords, { icon: ljIcon }).addTo(ljIconsLayer).bindPopup(popupContent).on('click', () => {
+                const labels = Array.from({ length: 60 }, (_, i) => `-${120 - i*2}m`);
+                const saltsCombinats = [...cell.saltN2, ...cell.saltN1];
+                mostrarGrafic(labels, cell.recomptesComplets, saltsCombinats);
+            });
+        }
+        
+        const MINUTS_MINIMS_DE_TRAJECTORIA = 14;
+        if (!cell.trajectoria || cell.trajectoria.length < MINUTS_MINIMS_DE_TRAJECTORIA) return;
+        
+        const projeccio = calcularTrajectoriaFutura(cell);
+        if (projeccio) {
+            const { puntInicial, velocitatKmh, direccio, desviacioDireccio, velocitatKmPerMinut } = projeccio;
+            let factorEixamplament = 1.5 + (desviacioDireccio / 15);
+            factorEixamplament = Math.min(factorEixamplament, 3);
+            const bbox = turf.bbox(featureCollection);
+            const ampleEstimat = turf.distance(turf.point([bbox[0], bbox[1]]), turf.point([bbox[2], bbox[1]]), { units: 'kilometers' });
+            const radiInicial = Math.max(ampleEstimat / 2, 4);
+            const puntFinal60min = turf.destination(puntInicial, velocitatKmPerMinut * 60, parseFloat(direccio));
+            const radiFinal60min = radiInicial * factorEixamplament;
+            const v1 = turf.destination(puntInicial, radiInicial, parseFloat(direccio) - 90).geometry.coordinates;
+            const v2 = turf.destination(puntInicial, radiInicial, parseFloat(direccio) + 90).geometry.coordinates;
+            const v3 = turf.destination(puntFinal60min, radiFinal60min, parseFloat(direccio) + 90).geometry.coordinates;
+            const v4 = turf.destination(puntFinal60min, radiFinal60min, parseFloat(direccio) - 90).geometry.coordinates;
+            const poligonCon = turf.polygon([[v1, v2, v3, v4, v1]]);
+            const conLayer = L.geoJSON(poligonCon, { style: { color: estilPoligon.color, weight: 1.5, opacity: 0.8, fillColor: estilPoligon.color, fillOpacity: 0.1, } });
+            const popupConeContent = `<b>Projecció a 1 Hora</b><hr><b>Estat tempesta:</b> ${estilPoligon.lj}<br><b>Velocitat estimada:</b> ${velocitatKmh} km/h<br><b>Direcció:</b> ${direccio}°<br><b>Incertesa (desv. dir.):</b> ${desviacioDireccio.toFixed(1)}°<br><b>Factor eixamplament:</b> ${factorEixamplament.toFixed(1)}x`;
+            conLayer.bindPopup(popupConeContent);
+            conLayer.addTo(cellulesTempestaLayer);
+            [15, 30, 45, 60].forEach(minuts => {
+                const puntCentral = turf.destination(puntInicial, velocitatKmPerMinut * minuts, parseFloat(direccio));
+                const radiActual = radiInicial * (1 + (factorEixamplament - 1) * (minuts / 60));
+                const pEsquerra = turf.destination(puntCentral, radiActual, parseFloat(direccio) - 90);
+                const pDreta = turf.destination(puntCentral, radiActual, parseFloat(direccio) + 90);
+                L.polyline([pEsquerra.geometry.coordinates.reverse(), pDreta.geometry.coordinates.reverse()], { color: estilPoligon.color, weight: 1.5, opacity: 0.9 }).addTo(cellulesTempestaLayer);
+                const iconaTemps = L.divIcon({ className: 'temps-projeccio-label', html: `<span>+${minuts}'</span>`, iconSize: [40, 20], iconAnchor: [20, 10] });
+                L.marker(pDreta.geometry.coordinates, { icon: iconaTemps }).addTo(cellulesTempestaLayer);
+            });
+            const popupOriginal = poligonLayer.getPopup();
+            if (popupOriginal) {
+                const contingutOriginal = popupOriginal.getContent();
+                const nouContingut = `${contingutOriginal}<hr style="margin: 4px 0;">Moviment: <b>${velocitatKmh} km/h</b> (${direccio}°)`;
+                poligonLayer.setPopupContent(nouContingut);
+            }
         }
     });
+
+    if (newAlertsFound) {
+        processAlertQueue();
+    }
+}
+
+/**
+ * FUNCIÓ DE SEGUIMENT INCREMENTAL (PER A LES ACTUALITZACIONS CONTÍNUES)
+ */
+function analitzarTempestesSMC() {
+    console.log("Iniciant anàlisi incremental de cèl·lules...");
+    const dadesCompletes = getCombinedLightningData();
+
+    // Filtrem per llamps recents per identificar les cèl·lules actuals
+    const now = Date.now();
+    const tempsLimit = now - (20 * 60 * 1000); // Finestra de 20 min per activitat
+    const llampsRecents = new Map();
+    dadesCompletes.forEach((llamp, id) => {
+        if (llamp.timestamp >= tempsLimit) {
+            llampsRecents.set(id, llamp);
+        }
+    });
+    
+    const graella = rasteritzarLlamps(llampsRecents);
+    let celulesActuals = identificarCelules(graella);
+    
+    // Les seguim basant-nos en l'estat global anterior
+    celulesActuals = ferSeguimentDeCelules(celulesActuals, celulesAnteriors);
+    
+    // Les analitzem (aquí s'aplicarà el filtre de 14 min per al LJ)
+    const celulesAnalitzades = analitzarCadaCelula(celulesActuals, dadesCompletes);
+    
+    visualitzarCelules(celulesAnalitzades);
+    
+    // Guardem l'estat actual per a la propera actualització
+    celulesAnteriors = celulesAnalitzades;
 }
 
 /**
@@ -3036,7 +3359,7 @@ function ferSeguimentDeCelules(celulesActuals, celulesAnteriors) {
             }
         });
         
-        if (millorCandidat && distanciaMinima < 20) {
+        if (millorCandidat && distanciaMinima < 7) {
             actual.id = millorCandidat.id;
             const baseTrajectoria = Array.isArray(millorCandidat.trajectoria) ? millorCandidat.trajectoria : [];
             actual.trajectoria = [...baseTrajectoria, actual.centroide.geometry.coordinates];
@@ -3458,18 +3781,22 @@ updateMarkerStyle: function(markerData, ageMins = 0) {
         this.historicUpdateInterval = setInterval(() => this.fetchHistoricLightning(), 60000);
     },
 
-    stopHistoricMode: function() {
-        console.log("Aturant mode històric de llamps.");
-        if (this.historicUpdateInterval) {
-            clearInterval(this.historicUpdateInterval);
-            this.historicUpdateInterval = null;
-        }
-        this.historicStrikes.clear();
-        this.historicLayerGroup.clearLayers();
-    },
+stopHistoricMode: function() {
+    console.log("Aturant mode històric de llamps.");
+    if (this.historicUpdateInterval) {
+        clearInterval(this.historicUpdateInterval);
+        this.historicUpdateInterval = null;
+    }
+    this.historicStrikes.clear();
+    this.historicLayerGroup.clearLayers();
+    this.isInitialHistoricLoad = true; // <-- REINICIEM EL FLAG AQUÍ
+},
+
+isInitialHistoricLoad: true,
 
 fetchHistoricLightning: async function() {
-    console.log("Actualitzant dades històriques de llamps (en mode UTC)...");
+    console.log("Actualitzant dades històriques de llamps...");
+    // ... (la part inicial que obté les dades de l'API es manté igual)
     const urls = [];
     for (let i = 0; i < 24; i++) {
         const folderName = String(i).padStart(2, '0');
@@ -3481,31 +3808,35 @@ fetchHistoricLightning: async function() {
         const newHistoricStrikes = new Map();
         const now = new Date();
         const timeCutoff = now.getTime() - (120 * 60 * 1000);
-
         allStrikes.forEach(strike => {
             const strikeTime = new Date(strike[2] + 'Z').getTime();
             if (strikeTime >= timeCutoff) {
                 const lat = strike[1];
                 const lon = strike[0];
                 const strikeId = `${lon}_${lat}_${strike[2]}`;
-                newHistoricStrikes.set(strikeId, {
-                    lat: lat,
-                    lon: lon,
-                    timestamp: strikeTime,
-                });
+                newHistoricStrikes.set(strikeId, { lat: lat, lon: lon, timestamp: strikeTime });
             }
         });
         
         this.historicStrikes = newHistoricStrikes;
-        console.log(`Processats ${this.historicStrikes.size} llamps històrics dins de la finestra de temps.`);
+        console.log(`Processats ${this.historicStrikes.size} llamps històrics.`);
         this.updateHistoricMarkers();
 
+        // ======================================================
+        // NOVA LÒGICA HÍBRIDA
+        // ======================================================
         if (isAutoDetectMode) {
-            analitzarTempestesSMC(); // Ja no necessita paràmetres, agafa les dades fusionades
+            if (this.isInitialHistoricLoad) {
+                console.log("Executant anàlisi retrospectiu inicial...");
+                analitzarTempestesRetrospectivament(getCombinedLightningData());
+                this.isInitialHistoricLoad = false; // Marquem que la càrrega inicial ja s'ha fet
+            } else {
+                console.log("Executant anàlisi incremental...");
+                analitzarTempestesSMC(); // En les següents actualitzacions, fem la versió lleugera
+            }
         } else if (analisisPolygon) {
             analitzarLightningJump();
         }
-
     } catch (error) {
         console.error("Error obtenint dades històriques de llamps:", error);
     }
